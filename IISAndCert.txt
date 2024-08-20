@@ -1,0 +1,53 @@
+$certName = 'InsertCertName'
+
+if((Get-ChildItem Cert:\LocalMachine\My | Where-Object {$_.FriendlyName -eq $certName }).Count -eq 0){
+    $cert = New-SelfSignedCertificate -CertStoreLocation 'Cert:\LocalMachine\My' -DnsName 'localhost' -FriendlyName $certName -NotAfter (Get-Date).AddYears(24)
+} else {
+    $cert = (Get-ChildItem Cert:\LocalMachine\My | Where-Object {$_.FriendlyName -eq $certName })[0]
+}
+
+#If cert is not trusted, add it to be trusted
+#without this the apis will fail, you can check this by looking in mmc -> certs computer local machine and seeing the cert in there
+if((Get-ChildItem Cert:\LocalMachine\Root | Where-Object {$_.FriendlyName -eq $certName }).Count -eq 0){
+    $MHT = @{
+    TypeName = 'System.Security.Cryptography.X509Certificates.X509Store'
+    ArgumentList  = ('Root', 'LocalMachine')
+    }
+    $DestStore = New-Object  @MHT
+    $DestStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+    # Popup occurs here
+    $DestStore.Add($cert)
+    $DestStore.Close()
+}
+
+Get-ChildItem $PSScriptRoot\..\..\Deploy _PublishedWebsites -Recurse -Directory | Get-ChildItem | ForEach-Object { 
+
+    $name = $_.BaseName
+    $fullName = $_.FullName
+
+    #Get the project file so we can match what IIS express https is deploying as so we dont have to transfor the configs
+    $csProj = Get-ChildItem $PSScriptRoot\..\..\Source "$name.csproj" -Recurse
+    $csProjxml = [System.Xml.XmlDocument](Get-Content $csProj[0].FullName)
+    
+    $ns = New-Object System.Xml.XmlNamespaceManager -ArgumentList $csProjxml.NameTable
+    $ns.AddNamespace("ns", "http://schemas.microsoft.com/developer/msbuild/2003")
+    $iisUrl = $csProjxml.SelectSingleNode("//ns:IISUrl", $ns).InnerText
+    $port = $iisUrl.Split(':')[2].TrimEnd('/')
+
+    $bindingInformation = "*:" + $port + ":"
+    write-host "$name - $bindingInformation"
+    $Site = Get-Website -Name $name
+
+    if($Site.Count -ne 0){
+        Remove-WebSite -Name $name -Confirm:$false
+    }
+
+    if((Get-IISAppPool -Name $name).Count -ne 0){
+        Remove-WebAppPool -Name $name
+    }
+
+    New-WebAppPool -Name $name
+
+    New-Website -Name $name  -PhysicalPath $fullName -Port $port -ApplicationPool $name -Ssl -Force
+    (Get-WebBinding -Name $name -Port $port -Protocol "https").AddSslCertificate($cert.Thumbprint, "my")
+}
